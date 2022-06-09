@@ -1,0 +1,10 @@
+*.d
+*.o
+*.so
+*.exe
+/.depend
+*.un~
+/tags
+/TAGS
+*_binary
+CMakeFiles
