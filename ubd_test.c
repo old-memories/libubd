@@ -34,6 +34,9 @@
 
 struct ubd_test_data {
     int backing_file_fd;
+    int nr_queues;
+    int queue_depth;
+    void *io_buf;
 };
 
 struct ubd_test_srv_queue_thread_data {
@@ -45,15 +48,25 @@ struct ubd_test_srv_queue_thread_data {
 
 static char test_exe[256];
 
-/* need lots of memory  */
-static char write_buf   [MAX_NR_Q][MAX_QD][TEST_RQ_MAX_BUF_SIZE];
-static char read_buf    [MAX_NR_Q][MAX_QD][TEST_RQ_MAX_BUF_SIZE];
-
 static int ubdsrv_started;
 
 static volatile sig_atomic_t keep_running = 1;
 
-static struct ubd_test_data test_data;
+static struct ubd_test_data test_data = {
+    .backing_file_fd = -1
+};
+
+static void *test_get_io_buf(int q_id, int tag)
+{
+    int nr_queues = test_data.nr_queues;
+    int queue_depth = test_data.queue_depth;
+
+    unsigned int idx = (q_id * nr_queues + tag) * TEST_RQ_MAX_BUF_SIZE;
+
+    assert(queue_depth > tag);
+
+    return test_data.io_buf + idx;
+}
 
 static void test_hande_io(struct ubdlib_ubdsrv *srv,
         int q_id,
@@ -75,9 +88,9 @@ static void test_hande_io(struct ubdlib_ubdsrv *srv,
         assert(iod->need_buf_addr == 1);
         assert(iod->len <= TEST_RQ_MAX_BUF_SIZE);
 
-        ubdlib_set_io_buf_addr(srv, q_id, tag, read_buf[q_id][tag]);
+        ubdlib_set_io_buf_addr(srv, q_id, tag, test_get_io_buf(q_id, tag));
         
-        ret = pread(test_data.backing_file_fd, read_buf[q_id][tag], 
+        ret = pread(test_data.backing_file_fd, test_get_io_buf(q_id, tag), 
                 iod->len, iod->off);
         if(ret < 0)
             fprintf(stderr, "%s: read failed on q_id %d tag %d "
@@ -99,14 +112,14 @@ static void test_hande_io(struct ubdlib_ubdsrv *srv,
 
         /* ubd_drv issues a WRITE req, so ubdsrv provides buf addr now */
         if(iod->need_buf_addr) {
-            ubdlib_set_io_buf_addr(srv, q_id, tag, write_buf[q_id][tag]);
+            ubdlib_set_io_buf_addr(srv, q_id, tag, test_get_io_buf(q_id, tag));
             ubdlib_need_get_data(srv, q_id, tag);
             /* will return to ubd_drv to copy data from biovec to user buf */
             DEBUG_OUTPUT(fprintf(stdout, 
                     "%s: set buf for WRITE req, q_id %d tag %d\n",
                     __func__, q_id, tag));
         } else {           
-            ret = pwrite(test_data.backing_file_fd, write_buf[q_id][tag],
+            ret = pwrite(test_data.backing_file_fd, test_get_io_buf(q_id, tag),
                     iod->len, iod->off);
             if(ret < 0)
                 fprintf(stderr, "%s: write failed on q_id %d tag %d "
@@ -363,6 +376,12 @@ int main(int argc, char **argv)
                 __func__, backing_file);
         exit(1);
     }
+
+    assert(!posix_memalign(&test_data.io_buf, getpagesize(),
+            nr_queues * queue_depth * TEST_RQ_MAX_BUF_SIZE));
+    
+    test_data.nr_queues = nr_queues;
+    test_data.queue_depth = queue_depth;
     
     /* 
      * A ctrl_dev includes information of the ubd device
@@ -464,6 +483,8 @@ int main(int argc, char **argv)
      * now ubdsrv is stopped and pthread is finished
      */
     pthread_join(ubdsrv_tid, NULL);
+
+    free(test_data.io_buf);
 
     fprintf(stdout, "%s: ubdsrv exited.\n", __func__);
 
