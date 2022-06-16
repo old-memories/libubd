@@ -9,7 +9,11 @@
 #include <stdatomic.h>
 #endif
 
+#ifdef DEBUG
 #define DEBUG_OUTPUT(s) s
+#else
+#define DEBUG_OUTPUT(s)
+#endif
 
 #define round_up(val, rnd) \
 	(((val) + (rnd - 1)) & ~(rnd - 1))
