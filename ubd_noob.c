@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <linux/types.h>
 
 #include "libubd.h"
 #include "ubd_cmd.h"
