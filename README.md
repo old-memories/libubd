@@ -4,8 +4,6 @@
 
 - libubd_library.so: the shared library
 
-- ubd_test_binary: test adding and deleting of ubd ctrl device
-
 - ubd_aio_test_binary: test ubd aio framework
 
 - ubd_noob_binary: a very simple ubd target. 
@@ -14,11 +12,14 @@
     For READ requests, it behaves like /dev/zero;
     For WRITE requests, it behaves like /dev/null.
 
-- ubd_runner_binary: a more complicated ubd target.
-    It handles IOs in per ubd queue's work threads
-    asynchronously.
+- ubd_test_binary: more complicated than ubd_noob_binary.
+    It still handles IOs one by one per ubd queue.
     It has a backing file(O_DIRECT) and data is READ/WRITTEN from/into this file.
     This target allocates internal data buffer itself.
+
+- ubd_runner_binary: a much more complicated ubd target.
+    It handles IOs in per ubd queue's work threads
+    asynchronously.
 
 ## Quick start
 
@@ -31,8 +32,11 @@
 
 - sudo ./ubd_noob_binary
 
+- sudo ./ubd_test_binary -n DEV_ID -q NR_HW_QUEUES -d QUEUE_DEPTH -f BACKING_FILE
+
 - sudo ./ubd_runner_binary -n DEV_ID -q NR_HW_QUEUES -d QUEUE_DEPTH -t NR_IO_THREADS -s RQ_MAX_BUF_SIZE -f BACKING_FILE
 
+- explanation on args of ubd_test_binary and ubd_runner_binary
     - DEV_ID: a number X identifies the ubd device: /dev/ubdbX and /dev/udbdcX
 
     - NR_HW_QUEUES: number of queues in ubd, which is equal to nr_hw_queues in blk_mq_tag_set
