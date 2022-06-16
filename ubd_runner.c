@@ -111,7 +111,7 @@ static int runner_handle_io_fn(void *data)
         ret = pwrite(runner_data.backing_file_fd,
                 runner_get_io_buf(q_id, tag), iod->len, iod->off);
         if(ret < 0)
-            fprintf(stderr, "%s: write failed on q_id %d tag %d, errno %s",
+            fprintf(stderr, "%s: write failed on q_id %d tag %d, errno %s\n",
                     __func__, q_id, tag, strerror(errno));
 
         break;
@@ -120,7 +120,7 @@ static int runner_handle_io_fn(void *data)
         ret = pread(runner_data.backing_file_fd,
                 runner_get_io_buf(q_id, tag), iod->len, iod->off);
         if(ret < 0)
-            fprintf(stderr, "%s: read failed on q_id %d tag %d, errno %s",
+            fprintf(stderr, "%s: read failed on q_id %d tag %d, errno %s\n",
                     __func__, q_id, tag, strerror(errno));
 
         ubdlib_set_io_buf_addr(srv, q_id, tag, runner_get_io_buf(q_id, tag));

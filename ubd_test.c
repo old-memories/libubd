@@ -79,6 +79,14 @@ static void test_hande_io(struct ubdlib_ubdsrv *srv,
         
         ret = pread(test_data.backing_file_fd, read_buf[q_id][tag], 
                 iod->len, iod->off);
+        if(ret < 0)
+            fprintf(stderr, "%s: read failed on q_id %d tag %d "
+                    "fd %d io opcode %d len %d off %lld flags %d "
+                    ", errno %s\n",
+                    __func__, q_id, tag,
+                    test_data.backing_file_fd,
+                    iod->op, iod->len, iod->off, iod->flags,
+                    strerror(errno));
         
         DEBUG_OUTPUT(fprintf(stdout, 
                 "%s: complete READ req, q_id %d tag %d\n",
@@ -98,8 +106,16 @@ static void test_hande_io(struct ubdlib_ubdsrv *srv,
                     "%s: set buf for WRITE req, q_id %d tag %d\n",
                     __func__, q_id, tag));
         } else {           
-            ret = pwrite(test_data.backing_file_fd, read_buf[q_id][tag],
+            ret = pwrite(test_data.backing_file_fd, write_buf[q_id][tag],
                     iod->len, iod->off);
+            if(ret < 0)
+                fprintf(stderr, "%s: write failed on q_id %d tag %d "
+                        "fd %d io opcode %d len %d off %lld flags %d "
+                        ", errno %s\n",
+                        __func__, q_id, tag,
+                        test_data.backing_file_fd,
+                        iod->op, iod->len, iod->off, iod->flags,
+                        strerror(errno));
             
             DEBUG_OUTPUT(fprintf(stdout, 
                     "%s: complete WRITE req, q_id %d tag %d\n",
