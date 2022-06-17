@@ -108,19 +108,15 @@ void *ubdsrv_queue_loop(void *data)
     int dev_id = queue_thread_data->dev_id;
     int q_id = queue_thread_data->q_id;
     int to_submit, submitted, reapped;
-    char *pthread_name;
+    char pthread_name[32];
 
-    asprintf(&pthread_name, "ubdsrv_%d_queue_%d_thread",
+    snprintf(pthread_name, 32, "ubdsrv_%d_queue_%d_thread",
             dev_id, q_id);
 
     pthread_setname_np(pthread_self(), pthread_name);
 
     fprintf(stdout, "start ubdsrv queue %d thread %ld %s\n",
             q_id, syscall(SYS_gettid), pthread_name);
-
-    free(pthread_name);
-	
-	setpriority(PRIO_PROCESS, getpid(), -20);
 
     /* the first round submission to make ubd_drv ready */
     to_submit = ubdlib_fetch_io_requests(srv, q_id);
@@ -165,20 +161,18 @@ void *ubdsrv_loop(void *data)
     struct ubd_noob_srv_queue_thread_data queue_thread_data_arr[NR_Q];
     int i;
     int dev_id;
-    char *pthread_name;
+    char pthread_name[32];
 
     assert(NR_Q == nr_queues);
 
     dev_id = ubdlib_get_ctrl_dev_id(ctrl_dev);
 
-    asprintf(&pthread_name, "ubdsrv_%d_thread", dev_id);
+    snprintf(pthread_name, 32, "ubdsrv_%d_thread", dev_id);
 
     pthread_setname_np(pthread_self(), pthread_name);
 
     fprintf(stdout, "start ubdsrv thread %ld %s\n",
             syscall(SYS_gettid), pthread_name);
-
-    free(pthread_name);
     
     srv = ubdlib_ubdsrv_init(ctrl_dev);
     if(!srv)

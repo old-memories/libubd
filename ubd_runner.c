@@ -34,7 +34,7 @@
 
 #define MAX_RQ_MAX_BUF_SIZE (1024 * 1024)
 
-#define UBDSRV_URING_TIMEOUT_US 1000 * 1000 * 1
+#define UBDSRV_URING_TIMEOUT_US 10
 
 #define UBDSRV_START_TIMEOUT_S 3
 
@@ -221,20 +221,16 @@ void *ubdsrv_queue_loop(void *data)
     int dev_id = queue_thread_data->dev_id;
     int q_id = queue_thread_data->q_id;
     int to_submit, submitted, reapped;
-    char *pthread_name;
+    char pthread_name[32];
 
-    asprintf(&pthread_name, "ubdsrv_%d_queue_%d_thread",
+    snprintf(pthread_name, 32, "ubdsrv_%d_queue_%d_thread",
             dev_id, q_id);
 
     pthread_setname_np(pthread_self(), pthread_name);
 
     fprintf(stdout, "start ubdsrv queue %d thread %ld %s\n",
             q_id, syscall(SYS_gettid), pthread_name);
-
-    free(pthread_name);
 	
-	setpriority(PRIO_PROCESS, getpid(), -20);
-
     /* the first round submission to make ubd_drv ready */
     to_submit = ubdlib_fetch_io_requests(srv, q_id);
 
@@ -296,7 +292,7 @@ void *ubdsrv_queue_loop(void *data)
          */ 
         submitted = ubdlib_io_uring_enter_timeout(srv, q_id,
                 to_submit, 1, 0, UBDSRV_URING_TIMEOUT_US);
-        if(submitted < 0)
+        if(submitted < 0 && errno != ETIME)
             fprintf(stderr, "%s: q_id %d submitted %d, errno:%s\n",
                     __func__, q_id, submitted, strerror(errno));
 
@@ -318,7 +314,7 @@ void *ubdsrv_loop(void *data)
     struct ubd_runner_srv_queue_thread_data *queue_thread_data_arr;
     int i;
     int dev_id;
-    char *pthread_name;
+    char pthread_name[32];
 
     queue_thread_data_arr = calloc(nr_queues, sizeof(*queue_thread_data_arr));
 
@@ -326,14 +322,12 @@ void *ubdsrv_loop(void *data)
 
     dev_id = ubdlib_get_ctrl_dev_id(ctrl_dev);
 
-    asprintf(&pthread_name, "ubdsrv_%d_thread", dev_id);
+    snprintf(pthread_name, 32, "ubdsrv_%d_thread", dev_id);
 
     pthread_setname_np(pthread_self(), pthread_name);
 
     fprintf(stdout, "start ubdsrv thread %ld %s\n",
             syscall(SYS_gettid), pthread_name);
-
-    free(pthread_name);
     
     srv = ubdlib_ubdsrv_init(ctrl_dev);
  

@@ -52,16 +52,14 @@ static void *io_wq_thread_loop(void *data)
     struct ubd_aio_io_wq *io_wq = data;
     struct ubd_aio_io_work *work;
 	int ret;
-    char *pthread_name;
+    char pthread_name[32];
 
-    asprintf(&pthread_name, "queue_%d_io_wq_thread", io_wq->q_id);
+    snprintf(pthread_name, 32, "queue_%d_io_wq_thread", io_wq->q_id);
 
     pthread_setname_np(pthread_self(), pthread_name);
 
     fprintf(stdout, "start ubd_aio_io_wq thread %ld %s\n",
             syscall(SYS_gettid), pthread_name);
-
-    free(pthread_name);
 
 	while (1) {
 
