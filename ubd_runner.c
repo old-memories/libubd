@@ -24,11 +24,11 @@
 
 #define MAX_NR_Q 32
 
-#define DEF_NR_IO_THREADS 1
+#define DEF_NR_IO_THREADS 64
 
-#define DEF_QD 128
+#define DEF_QD 64
 
-#define MAX_QD 256
+#define MAX_QD 128
 
 #define DEF_RQ_MAX_BUF_SIZE (1024 * 1024)
 
@@ -257,8 +257,10 @@ void *ubdsrv_queue_loop(void *data)
          * (2) no sqe is sent to ubd_drv(since ubdsrv is handling
          *     io on all tags)
          */
+        pthread_mutex_lock(&runner_data.locks[q_id]);
         reapped = ubdlib_reap_io_events(srv, q_id,
                 runner_submit_io, &runner_data.io_wqs[q_id]);
+        pthread_mutex_unlock(&runner_data.locks[q_id]);
 	    
         DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d reapped %d\n",
 			    __func__, q_id, reapped));
