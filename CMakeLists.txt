@@ -10,6 +10,8 @@ set(CMAKE_C_FLAGS "-g -D_GNU_SOURCE -DDEBUG -MMD -fPIC -Wall")
 
 find_library(PTHREAD pthread)
 
+find_library(LIBURING NAMES liburing.so PATHS /usr/lib)
+
 #Generate the shared library from the library sources
 add_library(ubd_library SHARED 
     libubd.c
@@ -70,6 +72,31 @@ target_include_directories(ubd_test_binary
     ${PROJECT_SOURCE_DIR}/include/ccan
 )
 
+
+############################################################
+# Create an executable
+############################################################
+
+# Add an executable with the above sources
+add_executable(ubd_test_io_uring_binary
+    ubd_test_io_uring.c
+)
+
+# link the new ubd_library target with the ubd_runner_binary target
+target_link_libraries(ubd_test_io_uring_binary
+    PRIVATE 
+    ubd::library
+    ${PTHREAD}
+    ${LIBURING}
+
+)
+
+target_include_directories(ubd_test_io_uring_binary
+    PRIVATE 
+        ${PROJECT_SOURCE_DIR}/include
+    PRIVATE 
+    ${PROJECT_SOURCE_DIR}/include/ccan
+)
 
 ############################################################
 # Create an executable
