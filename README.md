@@ -17,6 +17,9 @@
     It has a backing file(O_DIRECT) and data is READ/WRITTEN from/into this file.
     This target allocates internal data buffer itself.
 
+- ubd_test_io_uring_binary: It is based on ubd_test_binary, but replaces pread/pwrite by liburing APIs.
+    Therefore, with iodepth > 1, liburing can batch IO requests and IOPS is higher.
+
 - ubd_runner_binary: a much more complicated ubd target.
     It handles IOs in per ubd queue's work threads
     asynchronously.
@@ -26,6 +29,8 @@
 ### environment:
 - Linux kernel: https://github.com/old-memories/linux/commits/v5.17-ubd-dev-mq-ubuf
 - cmake
+- liburing
+
 
 ### how to build libubd and examples:
 - cmake .
