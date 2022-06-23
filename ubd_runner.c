@@ -139,9 +139,9 @@ static int runner_handle_io_fn(void *data)
             q_id, tag));
     /*
      * A lock per queue is required here because ubd_runner may 
-     * modifies on io requsts in ubdlib_commit_fetch_io_requests()
+     * modify one io requst in ubdlib_commit_fetch_io_requests()
      * and ubdlib_complete_io_request() at the same time in different
-     * threads(per queue io_wq threads and current ubdsrv_queue thread)
+     * threads(current ubdsrv_queue thread and its io_wq threads)
      */
     pthread_mutex_lock(&runner_data.locks[q_id]);
     ubdlib_complete_io_request(srv, q_id, tag, ret);
@@ -169,20 +169,17 @@ static void runner_submit_io(struct ubdlib_ubdsrv *srv,
 
     switch(iod->op) {
     case UBD_IO_OP_WRITE:
-        /* ubd_drv issues a WRITE req, so ubdsrv provides buf addr now */
         if(iod->need_buf_addr) {
-            ubdlib_set_io_buf_addr(srv, q_id, tag,
-                    runner_get_io_buf(q_id, tag));
-            /* needn't a lock here because io is handled one by one */
+            ubdlib_set_io_buf_addr(srv, q_id, tag, runner_get_io_buf(q_id, tag));
+
             ubdlib_need_get_data(srv, q_id, tag);
-            /* will return to ubd_drv to copy data from biovec to user buf */
             
             DEBUG_OUTPUT(fprintf(stdout, "%s: set buf for WRITE req, "
                     "q_id %d tag %d\n", __func__, q_id, tag));
-        break;
+            break;
         } else {
             /* 
-             * ubd_drv issues a WRITE req and data buf is fulfilled 
+             * ubd_drv issues the WRITE req again and data buf is fulfilled 
              * so fallthrough to next case to queue an io work
              */
         }
@@ -192,7 +189,7 @@ static void runner_submit_io(struct ubdlib_ubdsrv *srv,
 
         assert(io_work_data);
 
-        /* ubdlib_reap_io_events() does not save iod so a copy is needed */
+        /* must save iod because io is handled async */
         memcpy(&io_work_data->iod, iod, sizeof(*iod));
 
         io_work_data->q_id = q_id;
@@ -231,7 +228,6 @@ void *ubdsrv_queue_loop(void *data)
     fprintf(stdout, "start ubdsrv queue %d thread %ld %s\n",
             q_id, syscall(SYS_gettid), pthread_name);
 	
-    /* the first round submission to make ubd_drv ready */
     to_submit = ubdlib_fetch_io_requests(srv, q_id);
 
     DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d to_submit %d\n",
@@ -239,7 +235,7 @@ void *ubdsrv_queue_loop(void *data)
 
     /* 
      * must block in the first round, otherwise ubd_drv may not 
-     * have tome to check whether ubdsrv is ready, therefore
+     * have time to check whether ubdsrv is ready so
      * /dev/ubdbX may not be exposed.
      */
     submitted = ubdlib_io_uring_enter(srv, q_id,
@@ -250,12 +246,11 @@ void *ubdsrv_queue_loop(void *data)
 
 	do {		
         /* 
-         * For the first round, reapped is always bigger than zero.
+         * "reapped" is bigger than zero ONLY in the first round.
          * 
          * Otherwise, reapped may be zero because:
          * (1) no new requses is issued by ubd_drv
-         * (2) no sqe is sent to ubd_drv(since ubdsrv is handling
-         *     io on all tags)
+         * (2) no sqe is sent to ubd_drv by us
          */
         pthread_mutex_lock(&runner_data.locks[q_id]);
         reapped = ubdlib_reap_io_events(srv, q_id,
@@ -278,19 +273,18 @@ void *ubdsrv_queue_loop(void *data)
         DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d to_submit %d\n",
 			__func__, q_id, to_submit));
 
-        /* 
-         * UBD_IO_RES_ABORT has been sent to ubdsrv and
-         * no inflight tgt_io/ubd_cmd exists
-         */
         if (ubdlib_ubdsrv_queue_is_done(srv, q_id))
 			break;
         /*
-         * (1)to_submit may be zero if target is handling all requests(tags) 
-         *    so ubdlib_io_uring_enter_timeout() can return zero(submitted)
+         * (1) "to_submit" may be zero 
+         *     so ubdlib_io_uring_enter_timeout() can return zero("submitted")
          * 
-         * (2)We timeout on ubdlib_io_uring_enter_timeout() because
-         *    we have to check for target io completion periodcally
-         *    otherwise we may hang on it and never complete any io!
+         * (2) We choose ubdlib_io_uring_enter_timeout() instead of
+         *     ubdlib_io_uring_enter() because
+         *     we have to check for target io completion periodcally
+         *     otherwise we may hang on it and never complete any io...
+         * 
+         * (3) UBDSRV_URING_TIMEOUT_US is the timeout value(usec)
          */ 
         submitted = ubdlib_io_uring_enter_timeout(srv, q_id,
                 to_submit, 1, 0, UBDSRV_URING_TIMEOUT_US);
@@ -339,7 +333,7 @@ void *ubdsrv_loop(void *data)
         queue_thread_data_arr[i].dev_id = dev_id;
         queue_thread_data_arr[i].q_id = i;
         queue_thread_data_arr[i].srv = srv;
-        /* run ubdsrv_queue_loop in each new thread per queue */
+
         pthread_create(&queue_thread_data_arr[i].tid, NULL, 
 			ubdsrv_queue_loop, &queue_thread_data_arr[i]);
     }
@@ -386,7 +380,6 @@ static int open_backing_file(char *backing_file, int flags,
 	if (!backing_file || !dev_size)
 		return -1;
 
-	/* flags: O_RDWR */
     fd = open(backing_file, flags);
 	if (fd < 0) {
 		fprintf(stderr, "%s: backing file %s can't be opened: %s\n",
@@ -509,36 +502,15 @@ int main(int argc, char **argv)
     runner_data.queue_depth = queue_depth;
     runner_data.rq_max_buf_size = rq_max_buf_size;
 
-    /* 
-     * A ctrl_dev includes information of the ubd device
-     * (nr_queues, depth, dev_size...)
-     * ctrl-cmds(such as UBD_CMD_ADD_DEV) are releated to this ctrl_dev
-     */
     ctrl_dev = ubdlib_ctrl_dev_init(dev_id, nr_queues, queue_depth,
             dev_size, rq_max_buf_size, false);
     
     assert(ctrl_dev);
 
-/* 
-     * send UBD_CMD_ADD_DEV control command to ubd_drv to setup
-     * kernel resources such asio_desc pages, cdev(/dev/ubdcN) 
-     * and blk-mq bdev(/dev/ubdbN)
-     */
     assert(!ubdlib_dev_add(ctrl_dev));
 
     pthread_create(&ubdsrv_tid, NULL, ubdsrv_loop, ctrl_dev);
 
-    /* 
-     * wait for ubdsrv becoming ready: the ubdsrv loop should submit
-     * sqes to /dev/ubdcN, just like usb's urb usage, each request needs
-     * one sqe. 
-     * 
-     * (If one IO request comes to kernel driver of /dev/ubdbN,
-     * the sqe for this request is completed, and ubdsrv gets notified.)
-     * 
-     * When every io request of driver gets its own sqe queued, we think
-     * /dev/ubdbN is ready to start
-     */
     do {
         usleep(100000);
         cnt++;
@@ -547,16 +519,6 @@ int main(int argc, char **argv)
     runner_data.io_wqs = ubd_aio_setup_io_work_queue(nr_queues, nr_io_threads);
     assert(runner_data.io_wqs);
 
-   /*
-    * Now every io request of driver must get its own sqe queued
-    * 
-    * in current process context, not in pthread created,
-    * sent UBD_CMD_START_DEV command to /dev/ubd-control with device id,
-    * which will cause ubd driver to expose /dev/ubdbN(can handle requests now)
-    * 
-    * After this moment, ubdsrv can get io requests
-    * (the sqe for this request is completed)
-    */
     assert(!ubdlib_dev_start(ctrl_dev));
 
     fprintf(stdout, "---------------------------\n"
@@ -582,30 +544,10 @@ int main(int argc, char **argv)
             "get CTRL-C signal, noob is exiting now...\n"
             "---------------------------\n");    
 
-    /* 
-     * send UBD_CMD_GET_DEV_INFO command to /dev/ubd-control with 
-     * device id provided in order to update device info and ensure
-     * that device to be deleted actually exists.
-     */  
     assert(!ubdlib_dev_get_info(ctrl_dev));
 
-    /* 
-     * send UBD_CMD_STOP_DEV command to /dev/ubd-control with device id provided.
-     * After ubd_drv gets this command, it freezes(del_gendisk) /dev/ubdbN
-     * 
-     * (del_gendisk() will return after all inflight blk-mq reqs complete)
-     * 
-     * then complete all pending seq, meantime tell the daemon via cqe->res
-     * to not submit sqe any more, since we are being closed.
-     * Also delete /dev/ubdbN.
-     */
     assert(!ubdlib_dev_stop(ctrl_dev));
 
-    /* 
-     * the ubdsrv pthread figures out that all sqes are completed, and free,
-     * then close /dev/ubdcN and exit itself.
-     * now ubdsrv is stopped and pthread is finished
-     */
     pthread_join(ubdsrv_tid, NULL);
 
     ubd_aio_cleanup_io_work_queue(runner_data.io_wqs, runner_data.nr_io_wqs);
@@ -619,11 +561,6 @@ int main(int argc, char **argv)
 
     fprintf(stdout, "%s: ubdsrv exited.\n", __func__);
 
-    /* 
-     * send UBD_CMD_DEL_DEV command to /dev/ubd-control. After ubd_drv gets
-     * this command, all kernel resources(bdev and cdev) will be released.
-     */
-    
     assert(!ubdlib_dev_del(ctrl_dev));
 
     fprintf(stdout, "---------------------------\n"

@@ -80,17 +80,37 @@ struct ubdlib_ctrl_dev;
 
 struct ubdlib_ubdsrv;
 
+/* user should set buffer address for one WRITE/READ req */
 void ubdlib_set_io_buf_addr(struct ubdlib_ubdsrv *srv,
 		int q_id, unsigned tag, char *io_buf_addr);
 
+/* 1) After an io request is completed by backstore, call this function.
+ *
+ * 2) Note that a lock may be necessary if backstore completes io reqs
+ *    concurrently.
+ */
 void ubdlib_complete_io_request(struct ubdlib_ubdsrv *srv,
 		int q_id, int tag, int res);
 
+/* 
+ * For a WRITE req, user should set buffer address and call this function then 
+ * so that ubd_drv could soon copy data(biovec) to the write buffer and issue
+ * the WRITE req again.
+ */
 void ubdlib_need_get_data(struct ubdlib_ubdsrv *srv, int q_id,
 		int tag);
 
+/* check whether the queue loop should exit? */
 int ubdlib_ubdsrv_queue_is_done(struct ubdlib_ubdsrv *srv, int q_id);
 
+/* 1) After io_uring_enter returns, user should call this function to reap
+ *    io requests. It iterates on each io request and calls handle_io_event().
+ *
+ * 2) handle_io_event() is the pointer of a user-defined function
+ *    which handles one certain io request.
+ * 
+ * 3) data is passed to handle_io_event
+ */
 int ubdlib_reap_io_events(struct ubdlib_ubdsrv *srv, int q_id,
 		void (*handle_io_event)(
 				struct ubdlib_ubdsrv *srv,
@@ -100,8 +120,10 @@ int ubdlib_reap_io_events(struct ubdlib_ubdsrv *srv, int q_id,
 				void *data),
 			void *data);
 
+/* notify ubd_drv that we want io requests, only used in the first round */
 int ubdlib_fetch_io_requests(struct ubdlib_ubdsrv *srv, int q_id);
 
+/* notify ubd_drv that we are ready to commit io completions and want io requests */
 int ubdlib_commit_fetch_io_requests(struct ubdlib_ubdsrv *srv, int q_id);
 
 int ubdlib_io_uring_enter(struct ubdlib_ubdsrv *srv, int q_id, 

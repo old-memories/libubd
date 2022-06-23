@@ -1,3 +1,4 @@
+/* Part of this code is stolen from https://github.com/ming1/ubdsrv */
 #ifndef LIBUBD_URING_INC_H
 #define LIBUBD_URING_INC_H
 
@@ -44,7 +45,7 @@ static inline struct io_uring_sqe *io_uring_get_sqe(struct ubdsrv_uring *r,
 	return  &r->sqes[idx];
 }
 
-/********* part of following code is stolen from t/io_uring.c *****/
+/* io_uring_enter syscall may timemout if no min_complete requests are completed */
 static inline int io_uring_enter_timeout(struct ubdsrv_uring *r, unsigned int to_submit,
         unsigned int min_complete, unsigned int flags, unsigned long timeout_usec)
 {

@@ -54,7 +54,7 @@ static void noob_hande_io(struct ubdlib_ubdsrv *srv,
         assert(iod->need_buf_addr == 1);
         assert(iod->len <= NOOB_RQ_MAX_BUF_SIZE);
 
-        /* you can always read all zeros from noob */
+        /* always read all zeros from noob */
         ubdlib_set_io_buf_addr(srv, q_id, tag, noob_read_buf);
         
         /* noob does not handle any actual io */
@@ -192,9 +192,9 @@ void *ubdsrv_loop(void *data)
     ubdsrv_started = 1;
 
 	/*
- 	 * Now STOP DEV ctrl command has been sent to /dev/ubd-control
- 	 * (1)wait until all pending fetch commands are canceled
-	 * (2)wait until all per queue threads have been exited 
+ 	 * The ubdsrv is going to exit now:
+ 	 * (1) wait until all pending fetch commands are canceled
+	 * (2) wait until all per queue threads have been exited 
 	 */
 	for(i = 0; i < nr_queues; i++) {
 		pthread_join(tid[i], NULL);
@@ -230,22 +230,19 @@ int main(int argc, char **argv)
         exit(1);
     /* 
      * send UBD_CMD_ADD_DEV control command to ubd_drv to setup
-     * kernel resources such asio_desc pages, cdev(/dev/ubdcN) 
+     * kernel resources such ubd_io_desc's pages, cdev(/dev/ubdcN) 
      * and blk-mq bdev(/dev/ubdbN)
      */
     ret = ubdlib_dev_add(ctrl_dev);
     if(ret)
         exit(1);
 
+    /* start the ubdsrv loop */
     pthread_create(&ubdsrv_tid, NULL, ubdsrv_loop, ctrl_dev);
 
     /* 
      * wait for ubdsrv becoming ready: the ubdsrv loop should submit
-     * sqes to /dev/ubdcN, just like usb's urb usage, each request needs
-     * one sqe. 
-     * 
-     * (If one IO request comes to kernel driver of /dev/ubdbN,
-     * the sqe for this request is completed, and ubdsrv gets notified.)
+     * sqes to /dev/ubdcN
      * 
      * When every io request of driver gets its own sqe queued, we think
      * /dev/ubdbN is ready to start
@@ -263,8 +260,7 @@ int main(int argc, char **argv)
     * sent UBD_CMD_START_DEV command to /dev/ubd-control with device id,
     * which will cause ubd driver to expose /dev/ubdbN(can handle requests now)
     * 
-    * After this moment, ubdsrv can get io requests
-    * (the sqe for this request is completed)
+    * After this moment, ubdsrv can get io requests from kernel
     */
     ret = ubdlib_dev_start(ctrl_dev);
     if(ret)
@@ -281,10 +277,10 @@ int main(int argc, char **argv)
             DEV_SIZE,
             NOOB_RQ_MAX_BUF_SIZE);
 
-    
     if (signal(SIGINT, ubd_noob_sig_handler) == SIG_ERR)
 		exit(1);
     
+    /* do nothing in demo... */
     while(keep_running)
         usleep(1 * 1000 * 1000);
     
@@ -304,19 +300,21 @@ int main(int argc, char **argv)
      * send UBD_CMD_STOP_DEV command to /dev/ubd-control with device id provided.
      * After ubd_drv gets this command, it freezes(del_gendisk) /dev/ubdbN
      * 
-     * (del_gendisk() will return after all inflight blk-mq reqs complete)
+     * (del_gendisk() will block until all inflight blk-mq reqs complete)
      * 
-     * then complete all pending seq, meantime tell the daemon via cqe->res
-     * to not submit sqe any more, since we are being closed.
-     * Also delete /dev/ubdbN.
+     * ubd_drv commits all cqes with cqe->res set to UBD_IO_RES_ABORT
+     * 
      */
     ret = ubdlib_dev_stop(ctrl_dev);
     if(ret)
         exit(1);
     /* 
-     * the ubdsrv pthread figures out that all sqes are completed, and free,
-     * then close /dev/ubdcN and exit itself.
-     * now ubdsrv is stopped and pthread is finished
+     * 1) The ubdsrv queue loop figures out that it is done and exit
+     * 
+     * 2) The ubdsrv loop joins all queue threads, 
+     *    closes /dev/ubdcN and exits itself.
+     * 
+     * 2) Now ubdsrv pthread is exited, join it
      */
     pthread_join(ubdsrv_tid, NULL);
 

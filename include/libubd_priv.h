@@ -44,20 +44,15 @@ struct ubdsrv_queue {
 	int stopping;
 
 	/*
-	 * Read only by ubdsrv daemon, setup via mmap on /dev/ubdcN.
-	 *
-	 * ubdsrv_io_desc(iod) is stored in this buffer, so iod
-	 * can be retrieved by request's tag directly.
+	 * 1) ubdsrv_io_desc(iod)s are all stored in this buffer 
+	 *    and the buffer is allocated by ubd_drv and mmaped by ubdsrv.
 	 * 
-	 * ubdsrv writes the iod into this array, and notify ubdsrv daemon
-	 * by issued io_uring command beforehand.
-	 * */
+	 * 2) ubd_drv writes the iod and ubdsrv reads(READ ONLY) it.
+	 */
 	char *io_cmd_buf;
 
 	/*
-	 * ring for submit io command to ubd driver, can only be issued
-	 * from ubdsrv daemon.
-	 *
+	 * ring for submit io command to ubd driver
 	 * ring depth == dev_info->queue_depth.
 	 */
 	struct ubdsrv_uring ring;
