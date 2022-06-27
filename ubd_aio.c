@@ -54,7 +54,7 @@ static void *io_wq_thread_loop(void *data)
 	int ret;
     char pthread_name[32];
 
-    snprintf(pthread_name, 32, "queue_%d_io_wq_thread", io_wq->q_id);
+    snprintf(pthread_name, 32, "ubd_q%d_wq_thread", io_wq->q_id);
 
     pthread_setname_np(pthread_self(), pthread_name);
 

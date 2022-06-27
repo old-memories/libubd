@@ -220,7 +220,7 @@ void *ubdsrv_queue_loop(void *data)
     int to_submit, submitted, reapped;
     char pthread_name[32];
 
-    snprintf(pthread_name, 32, "ubdsrv_%d_queue_%d_thread",
+    snprintf(pthread_name, 32, "ubd%d_q%d_thread",
             dev_id, q_id);
 
     pthread_setname_np(pthread_self(), pthread_name);
@@ -318,7 +318,7 @@ void *ubdsrv_loop(void *data)
 
     dev_id = ubdlib_get_ctrl_dev_id(ctrl_dev);
 
-    snprintf(pthread_name, 32, "ubdsrv_%d_thread", dev_id);
+    snprintf(pthread_name, 32, "ubd%d_thread", dev_id);
 
     pthread_setname_np(pthread_self(), pthread_name);
 
