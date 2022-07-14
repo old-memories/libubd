@@ -261,7 +261,7 @@ void *ubdsrv_queue_loop(void *data)
          * if necessary.
          */
         reapped = ubdlib_reap_io_events(srv, q_id,
-                test_submit_io_uring, &ring_data);
+                test_submit_io_uring, NULL, &ring_data);
 	    
         DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d reapped %d\n",
 				__func__, q_id, reapped));

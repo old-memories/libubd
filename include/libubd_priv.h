@@ -4,6 +4,7 @@
 #include "ccan/list/list.h"
 #include "ubd_cmd.h"
 #include "libubd_uring.h"
+#include <sys/eventfd.h>
 
 #define	UBD_CONTROL_DEV	"/dev/ubd-control"
 
@@ -42,6 +43,13 @@ struct ubdsrv_queue {
 	int cmd_inflight, tgt_io_inflight;
 	
 	int stopping;
+
+	/* used by io workers to notify the io_uring context async IO completion */
+	eventfd_t efd;
+
+	int efd_killed;
+
+	int efd_poll_committed;
 
 	/*
 	 * 1) ubdsrv_io_desc(iod)s are all stored in this buffer 

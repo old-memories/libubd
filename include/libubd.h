@@ -80,6 +80,12 @@ struct ubdlib_ctrl_dev;
 
 struct ubdlib_ubdsrv;
 
+/* used for async io workers, 
+ * It is called after completing IOs and it wakes up io_uring context. 
+ */
+int ubdlib_issue_eventfd_io(struct ubdlib_ubdsrv *srv,
+		int q_id);
+
 /* user should set buffer address for one WRITE/READ req */
 void ubdlib_set_io_buf_addr(struct ubdlib_ubdsrv *srv,
 		int q_id, unsigned tag, char *io_buf_addr);
@@ -104,19 +110,26 @@ void ubdlib_need_get_data(struct ubdlib_ubdsrv *srv, int q_id,
 int ubdlib_ubdsrv_queue_is_done(struct ubdlib_ubdsrv *srv, int q_id);
 
 /* 1) After io_uring_enter returns, user should call this function to reap
- *    io requests. It iterates on each io request and calls handle_io_event().
+ *    io requests. It iterates on each io request and calls handle_io().
  *
- * 2) handle_io_event() is the pointer of a user-defined function
+ * 2) handle_io() is the pointer of a user-defined function
  *    which handles one certain io request.
  * 
- * 3) data is passed to handle_io_event
+ * 3) data is passed to handle_io
+ * 
+ * 4) handle_eventfd_io is the pointer of a user-defined function
+ *    which handles the eventfd's IO(used for async io workers)
  */
 int ubdlib_reap_io_events(struct ubdlib_ubdsrv *srv, int q_id,
-		void (*handle_io_event)(
+		void (*handle_io)(
 				struct ubdlib_ubdsrv *srv,
 				int q_id,
 				int tag,
 				const struct libubd_io_desc *iod,
+				void *data),
+		void (*handle_eventfd_io)(
+				struct ubdlib_ubdsrv *srv,
+				int q_id,
 				void *data),
 			void *data);
 

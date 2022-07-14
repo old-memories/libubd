@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <inttypes.h>
 #include <stdarg.h>
-
+#include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -17,7 +17,7 @@
 #include <string.h>
 #include <sched.h>
 #include <syslog.h>
-
+#include <poll.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -65,6 +65,16 @@ static inline unsigned long long ubdsrv_set_user_data(
 			unsigned long tag, unsigned long cmd_op)
 {
 	return tag | (cmd_op << 32);
+}
+
+static inline int is_eventfd_io(unsigned long long user_data)
+{
+	return !!(user_data & (1ULL << 63));
+}
+
+static inline unsigned long long ubdsrv_set_eventfd_user_data()
+{
+	return 1ULL << 63;
 }
 
 /*******************private io cmd func ********************************/
@@ -236,9 +246,9 @@ static int reap_ctrl_events(struct ubdsrv_uring *ring, int *cmd_res)
 			*cmd_res = cqe->res;
 		
 		if(cqe->res < 0)
-			fprintf(stderr, "%s: ctrl cqe res %d "
+			fprintf(stderr, "%s: ctrl cqe res: %s "
 					"dev_id %d cmd_op %d\n",
-					__func__, cqe->res, dev_id, cmd_op);
+					__func__,  strerror(-cqe->res), dev_id, cmd_op);
 		
 		reaped++;
 		head++;
@@ -353,6 +363,87 @@ static int ubdsrv_io_uring_setup(struct ubdsrv_uring *ring,
 
 /*******************private io_uring func ********************************/
 
+/*******************private eventfd func ********************************/
+static inline void prep_poll_cmd(struct io_uring_sqe *sqe,
+		int fd, unsigned poll_mask)
+{	
+
+	__WRITE_ONCE(sqe->opcode, IORING_OP_POLL_ADD);
+	__WRITE_ONCE(sqe->addr, 0);
+	__WRITE_ONCE(sqe->len, 0);
+	__WRITE_ONCE(sqe->fd, fd);
+	__WRITE_ONCE(sqe->user_data, ubdsrv_set_eventfd_user_data());
+	__WRITE_ONCE(sqe->off, 0);
+	
+
+#if __BYTE_ORDER == __BIG_ENDIAN
+	poll_mask = __swahw32(poll_mask);
+#endif
+	__WRITE_ONCE(sqe->poll32_events, poll_mask);
+}
+
+static int queue_poll_cmd(struct ubdsrv_queue *q, 
+		unsigned tail)
+{
+	struct ubdsrv_uring *ring = &q->ring;
+	struct io_sq_ring *sq_ring = &ring->sq_ring;
+	unsigned index, next_tail = tail + 1;
+	struct io_uring_sqe *sqe;
+
+	if (q->stopping || q->efd < 0 || q->efd_killed)
+		return -1;
+
+	if (next_tail == atomic_load_acquire(sq_ring->head))
+		return -1;
+
+	index = tail & ring->sq_ring_mask;
+	/* IORING_SETUP_SQE128 */
+	sqe = io_uring_get_sqe(ring, index, true);
+
+	/* q->efd is registered as 1 */
+	prep_poll_cmd(sqe, 1, POLLIN);
+	
+	sq_ring->array[index] = index;
+
+	return 0;
+}
+
+static void ubdsrv_kill_eventfd(struct ubdsrv_queue *q)
+{
+	eventfd_t v = 1;
+	
+	if (!q->efd_killed && q->efd >= 0) {
+		eventfd_write(q->efd, v);
+		q->efd_killed = 1;
+
+		DEBUG_OUTPUT(fprintf(stdout, "%s: kill efd: %lu now.\n",
+				__func__, q->efd));
+	}
+}
+
+static int complete_eventfd_io(struct ubdsrv_queue *q)
+{
+	eventfd_t v;
+	int tail;
+	
+	if (q->stopping || q->efd < 0 || q->efd_killed)
+		return -1;
+	
+	if (eventfd_read(q->efd, &v))
+		return -1;
+
+	tail = prep_queue_io_cmd(q);
+
+	if (queue_poll_cmd(q, tail) < 0)
+		return -1;
+
+	commit_queue_io_cmd(q, tail + 1);
+
+	q->efd_poll_committed = 1;
+
+	return 0;
+}
+/*******************private eventfd func ********************************/
 
 static int ubdsrv_queue_cmd_buf_sz(struct ubdsrv_queue *q)
 {
@@ -376,6 +467,12 @@ static void ubdsrv_queue_deinit(struct ubdsrv_queue *q)
 		munmap(q->io_cmd_buf, ubdsrv_queue_cmd_buf_sz(q));
 		q->io_cmd_buf = NULL;
 	}
+
+	if(q->efd >= 0) {
+		close(q->efd);
+		q->efd = -1;
+	}
+
 	q->srv->queues[q->q_id] = NULL;
 	free(q);
 }
@@ -386,6 +483,7 @@ static int ubdsrv_queue_init(struct ubdlib_ubdsrv *srv, int q_id)
 	struct ubdlib_ctrl_dev *ctrl_dev = srv->ctrl_dev;
 	int queue_depth = ctrl_dev->dev_info.queue_depth;
 	int i, ret = -1;
+	int register_fds[2];
 	int io_cmd_buf_size;
 	unsigned long io_cmd_buf_off;
 	int queue_size = sizeof(struct ubdsrv_queue) 
@@ -403,6 +501,9 @@ static int ubdsrv_queue_init(struct ubdlib_ubdsrv *srv, int q_id)
 	/* FIXME: depth has to be PO 2 */
 	q->q_depth = queue_depth;
 	q->ring.ring_fd = -1;
+	q->efd = -1;
+	q->efd_killed = 0;
+	q->efd_poll_committed = 0;
 
 	list_head_init(&q->need_commit_io_list);
 	list_head_init(&q->need_get_data_io_list);
@@ -417,6 +518,10 @@ static int ubdsrv_queue_init(struct ubdlib_ubdsrv *srv, int q_id)
 		q->io_cmd_buf = NULL;
 		goto fail;
 	}
+
+	q->efd = eventfd(0, 0);
+	if (q->efd < 0)
+		goto fail;
 	
 	for (i = 0; i < queue_depth; i++) {
 		/* 
@@ -429,12 +534,16 @@ static int ubdsrv_queue_init(struct ubdlib_ubdsrv *srv, int q_id)
 		q->ios[i].tag = i;
 	}
 
+	/* queue_depth + 1: one more for q->efd */
 	ret = ubdsrv_io_uring_setup(&q->ring, IORING_SETUP_SQE128,
-			IORING_FEAT_EXT_ARG ,queue_depth, NULL, 0);
+			IORING_FEAT_EXT_ARG ,queue_depth + 1, NULL, 0);
 	if (ret)
 		goto fail;
 
-	ret = io_uring_register_files(&q->ring, &srv->ubdc_dev_fd, 1);
+	register_fds[0] = srv->ubdc_dev_fd;
+	register_fds[1] = q->efd;
+
+	ret = io_uring_register_files(&q->ring, register_fds, 2);
 	if (ret)
 		goto fail;
 
@@ -444,6 +553,32 @@ static int ubdsrv_queue_init(struct ubdlib_ubdsrv *srv, int q_id)
  fail:
 	ubdsrv_queue_deinit(q);
 	return ret;
+}
+
+int ubdlib_issue_eventfd_io(struct ubdlib_ubdsrv *srv,
+		int q_id)
+{
+	struct ubdsrv_queue *q = srv->queues[q_id];
+	eventfd_t v = 1;	
+	int ret;
+	
+	if (q->efd < 0)
+		return -1;
+
+	DEBUG_OUTPUT(fprintf(stdout, "%s: wake up io_uring(q_id: %d) context now.\n",
+		__func__, q_id));
+
+	ret = eventfd_write(q->efd, v);
+	if (ret)
+			fprintf(stderr, "%s: eventfd_write(q_id: %d) failed, ret: %d.\n",
+			__func__, q_id, ret);
+
+	DEBUG_OUTPUT(fprintf(stdout, "%s: eventfd_write(q_id: %d), ret: %d.\n",
+		__func__, q_id, ret));
+	
+	return ret;
+
+	
 }
 
 void ubdlib_set_io_buf_addr(struct ubdlib_ubdsrv *srv,
@@ -494,11 +629,15 @@ int ubdlib_ubdsrv_queue_is_done(struct ubdlib_ubdsrv *srv, int q_id)
 }
 
 int ubdlib_reap_io_events(struct ubdlib_ubdsrv *srv, int q_id,
-		void (*handle_io_event)(
+		void (*handle_io)(
 				struct ubdlib_ubdsrv *srv,
 				int q_id,
 				int tag,
 				const struct libubd_io_desc *iod,
+				void *data),
+		void (*handle_eventfd_io)(
+				struct ubdlib_ubdsrv *srv,
+				int q_id,
 				void *data),
 			void *data)
 {
@@ -520,7 +659,22 @@ int ubdlib_reap_io_events(struct ubdlib_ubdsrv *srv, int q_id,
 		cqe = &cq_ring->cqes[head & ring->cq_ring_mask];
 		reaped++;
 
-		DEBUG_OUTPUT(assert(q->cmd_inflight > 0));
+		if (is_eventfd_io(cqe->user_data)) {
+			
+			if (cqe->res < 0)
+				fprintf(stderr, "%s: eventfd cqe res: %s\n",
+						__func__,  strerror(-cqe->res));
+			
+			if (handle_eventfd_io)
+				handle_eventfd_io(srv, q_id, data);
+			
+			if (complete_eventfd_io(q) < 0)
+				fprintf(stderr, "%s: failed\n",
+						__func__);
+			
+			head++;
+			continue;
+		}
 		
 		q->cmd_inflight -= 1;
 
@@ -530,6 +684,8 @@ int ubdlib_reap_io_events(struct ubdlib_ubdsrv *srv, int q_id,
 		/* must first check whether ubd_drv is stopped */
 		if(cqe->res == UBD_IO_RES_ABORT) {
 			q->stopping = 1;
+
+			ubdsrv_kill_eventfd(q);
 			
 			DEBUG_OUTPUT(fprintf(stdout, 
 					"%s: get UBD_IO_RES_ABORT on tag %d, "
@@ -543,9 +699,9 @@ int ubdlib_reap_io_events(struct ubdlib_ubdsrv *srv, int q_id,
 		
 		/* only let app handle valid ubd io */
 		if (cqe->res < 0) {
-			fprintf(stderr, "%s: io cqe res %d "
+			fprintf(stderr, "%s: io cqe res: %s "
 					"tag %d cmd_op %d\n",
-					__func__, cqe->res, 
+					__func__, strerror(-cqe->res), 
 					tag, last_cmd_op);
 			/* this io won't be issued any more */		
 			head++;
@@ -556,8 +712,8 @@ int ubdlib_reap_io_events(struct ubdlib_ubdsrv *srv, int q_id,
 
 		ubdsrv_get_iod(q, tag, last_cmd_op, &iod);
 
-		if (handle_io_event)
-			handle_io_event(srv, q_id, tag, &iod, data);
+		if (handle_io)
+			handle_io(srv, q_id, tag, &iod, data);
 		head++;
 	} while (1);
 
@@ -581,12 +737,18 @@ int ubdlib_fetch_io_requests(struct ubdlib_ubdsrv *srv, int q_id)
 			break;
 		}
 	}
-	
-	q->cmd_inflight += cnt;
-	
-	commit_queue_io_cmd(q, tail + cnt);
 
-	return cnt;
+	q->cmd_inflight += cnt;
+
+	if (queue_poll_cmd(q, tail + cnt) < 0) {
+		/* the sq_ring may be full */
+		fprintf(stderr, "%s: error while preparing polling for eventfd\n", __func__);
+		return cnt;
+	}
+	
+	commit_queue_io_cmd(q, tail + cnt + 1);
+
+	return cnt + 1;
 }
 
 /*
@@ -639,6 +801,11 @@ int ubdlib_commit_fetch_io_requests(struct ubdlib_ubdsrv *srv, int q_id)
 	if (cnt > 0) {
 		q->cmd_inflight += cnt;
 		commit_queue_io_cmd(q, tail + cnt);
+	}
+
+	if (q->efd_poll_committed) {
+		q->efd_poll_committed = 0;
+		cnt++;
 	}
 
 	return cnt;

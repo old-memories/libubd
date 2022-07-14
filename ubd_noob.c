@@ -14,7 +14,7 @@
 
 #define NR_Q 1
 
-#define QD 256
+#define QD 1
 
 #define DEV_SIZE (250ULL * 1024 * 1024 * 1024)
 
@@ -138,7 +138,7 @@ void *ubdsrv_queue_loop(void *data)
 				__func__, q_id, submitted));
 		
         reapped = ubdlib_reap_io_events(srv, q_id,
-                noob_hande_io, NULL);
+                noob_hande_io, NULL, NULL);
 	    
         DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d reapped %d\n",
 				__func__, q_id, reapped));

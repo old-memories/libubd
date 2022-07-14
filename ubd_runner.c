@@ -45,14 +45,17 @@ struct ubd_runner_data {
     int queue_depth;
     unsigned int rq_max_buf_size;
     void *io_buf;
-    pthread_mutex_t *locks;
+    pthread_spinlock_t *locks;
+    struct list_head *io_processed_lists;
 };
 
 struct ubd_runner_io_work_data {
     int q_id;
     int tag;
+    int res;
     struct ubdlib_ubdsrv *srv;
     struct libubd_io_desc iod;
+    struct list_node entry;
 };
 
 struct ubd_runner_srv_queue_thread_data {
@@ -137,17 +140,40 @@ static int runner_handle_io_fn(void *data)
             __func__,
             iod->op == UBD_IO_OP_READ ? "READ" : "WRITE",
             q_id, tag));
-    /*
-     * A lock per queue is required here because ubd_runner may 
-     * modify one io requst in ubdlib_commit_fetch_io_requests()
-     * and ubdlib_complete_io_request() at the same time in different
-     * threads(current ubdsrv_queue thread and its io_wq threads)
-     */
-    pthread_mutex_lock(&runner_data.locks[q_id]);
-    ubdlib_complete_io_request(srv, q_id, tag, ret);
-    pthread_mutex_unlock(&runner_data.locks[q_id]);
-    free(io_work_data);
+
+    io_work_data->res = ret;
+
+    pthread_spin_lock(&runner_data.locks[q_id]);
+    list_add_tail(&runner_data.io_processed_lists[q_id], &io_work_data->entry);
+    pthread_spin_unlock(&runner_data.locks[q_id]);
+
+    assert(!ubdlib_issue_eventfd_io(srv, q_id));
+    
     return 0;
+}
+
+static void runner_handle_eventfd_io(struct ubdlib_ubdsrv *srv, 
+        int q_id, void *data)
+{
+	struct ubd_runner_io_work_data *io_worker_data, *io_worker_data_next;
+
+	DEBUG_OUTPUT(fprintf(stdout, "%s: start handle io_processed_lists for q_id %d\n",
+            __func__, q_id));
+    
+    pthread_spin_lock(&runner_data.locks[q_id]);
+    list_for_each_safe(&runner_data.io_processed_lists[q_id],
+			io_worker_data, io_worker_data_next, entry) {		
+		
+        ubdlib_complete_io_request(srv, q_id, io_worker_data->tag, io_worker_data->res);
+
+		list_del_init(&io_worker_data->entry);
+
+        free(io_worker_data);
+	}
+    pthread_spin_unlock(&runner_data.locks[q_id]);
+
+    DEBUG_OUTPUT(fprintf(stdout, "%s: finish handle io_processed_lists for q_id %d\n",
+            __func__, q_id));
 }
 
 static void runner_submit_io(struct ubdlib_ubdsrv *srv,
@@ -195,6 +221,8 @@ static void runner_submit_io(struct ubdlib_ubdsrv *srv,
         io_work_data->q_id = q_id;
         io_work_data->srv = srv;
         io_work_data->tag = tag;
+        io_work_data->res = 0;
+        list_node_init(&io_work_data->entry);
 
         ubd_aio_queue_io(io_wq, io_work_data,
                 runner_handle_io_fn, runner_complete_io_fn);
@@ -206,7 +234,9 @@ static void runner_submit_io(struct ubdlib_ubdsrv *srv,
     default:
         fprintf(stdout, "%s: op %d not supported, q_id %d tag %d\n",
                 __func__, iod->op, q_id, tag);
+
         ubdlib_complete_io_request(srv, q_id, tag, 0);
+        
         break;    
     }
 }
@@ -233,68 +263,26 @@ void *ubdsrv_queue_loop(void *data)
     DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d to_submit %d\n",
 			__func__, q_id, to_submit));
 
-    /* 
-     * must block in the first round, otherwise ubd_drv may not 
-     * have time to check whether ubdsrv is ready so
-     * /dev/ubdbX may not be exposed.
-     */
-    submitted = ubdlib_io_uring_enter(srv, q_id,
-                to_submit, 1, 0);
-
-    DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d submitted %d\n",
-			__func__, q_id, submitted));
-
 	do {		
-        /* 
-         * "reapped" is bigger than zero ONLY in the first round.
-         * 
-         * Otherwise, reapped may be zero because:
-         * (1) no new requses is issued by ubd_drv
-         * (2) no sqe is sent to ubd_drv by us
-         */
-        pthread_mutex_lock(&runner_data.locks[q_id]);
-        reapped = ubdlib_reap_io_events(srv, q_id,
-                runner_submit_io, &runner_data.io_wqs[q_id]);
-        pthread_mutex_unlock(&runner_data.locks[q_id]);
-	    
-        DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d reapped %d\n",
-			    __func__, q_id, reapped));
-
-        /*
-         * A lock per queue is required here because ubd_runner may 
-         * modifies on io requsts in ubdlib_commit_fetch_io_requests()
-         * and ubdlib_complete_io_request() at the same time in different
-         * threads(per queue io_wq threads and current ubdsrv_queue thread)
-         */
-        pthread_mutex_lock(&runner_data.locks[q_id]);
-        to_submit = ubdlib_commit_fetch_io_requests(srv, q_id);
-        pthread_mutex_unlock(&runner_data.locks[q_id]);
-
+        
         DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d to_submit %d\n",
 			__func__, q_id, to_submit));
 
         if (ubdlib_ubdsrv_queue_is_done(srv, q_id))
 			break;
-        /*
-         * (1) "to_submit" may be zero 
-         *     so ubdlib_io_uring_enter_timeout() can return zero("submitted")
-         * 
-         * (2) We choose ubdlib_io_uring_enter_timeout() instead of
-         *     ubdlib_io_uring_enter() because
-         *     we have to check for target io completion periodcally
-         *     otherwise we may hang on it and never complete any io...
-         * 
-         * (3) UBDSRV_URING_TIMEOUT_US is the timeout value(usec)
-         */ 
-        submitted = ubdlib_io_uring_enter_timeout(srv, q_id,
-                to_submit, 1, 0, UBDSRV_URING_TIMEOUT_US);
-        if(submitted < 0 && errno != ETIME)
-            fprintf(stderr, "%s: q_id %d submitted %d, errno:%s\n",
-                    __func__, q_id, submitted, strerror(errno));
 
+        submitted = ubdlib_io_uring_enter(srv, q_id,
+                to_submit, 1, 0);
         DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d submitted %d\n",
 			    __func__, q_id, submitted));
 
+        reapped = ubdlib_reap_io_events(srv, q_id,
+                runner_submit_io, runner_handle_eventfd_io, &runner_data.io_wqs[q_id]);
+
+        DEBUG_OUTPUT(fprintf(stdout, "%s: q_id %d reapped %d\n",
+			    __func__, q_id, reapped));
+
+        to_submit = ubdlib_commit_fetch_io_requests(srv, q_id);
 	} while (1);
 	
 	fprintf(stdout, "%s: queue %d exited.\n", __func__, q_id);
@@ -489,11 +477,16 @@ int main(int argc, char **argv)
     }
     
     runner_data.locks = calloc(nr_queues, sizeof(*runner_data.locks));
+    
+    runner_data.io_processed_lists = calloc(nr_queues, sizeof(*runner_data.io_processed_lists));
 
     assert(runner_data.locks);
+    assert(runner_data.io_processed_lists);
 
-    for(i = 0; i < nr_queues; i++)
-        pthread_mutex_init(&runner_data.locks[i], NULL);
+    for(i = 0; i < nr_queues; i++) {
+        pthread_spin_init(&runner_data.locks[i], PTHREAD_PROCESS_PRIVATE);
+        list_head_init(&runner_data.io_processed_lists[i]);
+    }
 
     assert(!posix_memalign(&runner_data.io_buf, getpagesize(),
             nr_queues * queue_depth * rq_max_buf_size));
@@ -553,9 +546,11 @@ int main(int argc, char **argv)
     ubd_aio_cleanup_io_work_queue(runner_data.io_wqs, runner_data.nr_io_wqs);
 
     for(i = 0; i < nr_queues; i++)
-        pthread_mutex_destroy(&runner_data.locks[i]);
+        pthread_spin_destroy(&runner_data.locks[i]);
     
     free(runner_data.locks);
+
+    free(runner_data.io_processed_lists);
 
     free(runner_data.io_buf);
 
